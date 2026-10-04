@@ -1,16 +1,28 @@
+// INMP441 I2S microphone to ESP32 using Arduino framework 
 #include <Arduino.h>
 #include <driver/i2s.h>
 
-// Pins: must match your wiring
+// This current example shows how to read audio from an INMP441 I2S microphone and print the RMS and peak values to platformIO's serial monitor. 
+// The output is a simple 'bar' graph (using hashtags to represent volume) of the RMS(root mean sq)/peak values.
+
+// in this example, the INMP441 is connected to the ESP32 as follows:
+// purple  -> I2S_SCK (esp32, GPIO4)
+// orange  -> I2S_WS  (esp32, GPIO5)
+// yellow  -> I2S_SD  (esp32, GPIO6)
+
+// defining the I2S pins for the INMP441 microphone
 #define I2S_SCK 4   // purple
 #define I2S_WS  5   // orange
 #define I2S_SD  6   // yellow
 
-#define SAMPLE_RATE 16000
-#define BLOCK 512            // samples per read (32 ms of audio)
+// defining sample rate and block size for reading audio data
+#define SAMPLE_RATE 16000 // the inmp441 can handle sample rates up to 48kHz, but the ESP32 can only handle 16kHz reliably, so using 16kHz here. 32kHz is possible, but the ESP32 will drop samples if the CPU is busy with other tasks
+#define BLOCK 512            // samples per read (32 ms of audio) 
 
-int32_t raw[BLOCK];
+int32_t raw[BLOCK]; // buffer for reading audio data from the microphone
 
+// setup function to initialize the I2S driver and start reading audio data
+// will stop if the I2S driver fails to initialize
 void setup() {
   Serial.begin(115200);
   delay(1500);  // give the serial monitor time to connect
@@ -33,12 +45,13 @@ void setup() {
 
   if (i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL) != ESP_OK ||
       i2s_set_pin(I2S_NUM_0, &pins) != ESP_OK) {
-    Serial.println("I2S setup failed");
+    Serial.println("I2S setup failed, check the wiring and pin definitions");
     while (true) delay(1000);
   }
-  Serial.println("I2S started. Make some noise.");
+  Serial.println("I2S started. Make sure the microphone is connected to the correct pins and speak into it. The output will be printed to the serial monitor.");
 }
 
+// loop function to read audio data from the microphone and print RMS and peak values
 void loop() {
   static int counter = 0;
   size_t bytesRead = 0;
