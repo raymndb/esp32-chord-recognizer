@@ -8,14 +8,18 @@
 #     .venv\Scripts\python scripts\record_clip.py                 record 5 s
 #     .venv\Scripts\python scripts\record_clip.py --seconds 10    record 10 s
 #     .venv\Scripts\python scripts\record_clip.py --no-play       don't play the clip afterwards
-#   building the chord dataset (many takes of one chord, saved in data/raw/clips/<label>/, no playback):
-#     .venv\Scripts\python scripts\record_clip.py --label C_major --count 30 --seconds 2
-#       -> data/raw/clips/C_major/C_major_001.wav, C_major_002.wav, ...
-#       running it again later carries on numbering (C_major_031.wav, ...) instead of overwriting
+#   building the chord dataset (phase 4: one long take per chord, saved in data/takes/<session>/<label>/, no playback):
+#     .venv\Scripts\python scripts\record_clip.py --label C --seconds 240
+#       -> data/takes/2026-10-05/C/take_001.wav   (the session is today's date unless you pick one)
+#       running it again later carries on numbering (take_002.wav, ...) instead of overwriting
+#       then cut the takes into 2-second clips with scripts\slice_takes.py
+#     --session 2026-10-05b   name the session yourself (e.g. a second session on the same day, after retuning)
+#     --count 3          record several takes in a row
 #     --countdown 2      seconds of "3, 2, 1" before each take (default 3, 0 = none)
 #   any mode:
 #     --port COM5        pick the serial port yourself (default: find the ESP32 automatically)
-# Press Ctrl+C to stop a batch early; takes already saved are kept.
+# Press Ctrl+C to stop a batch early; takes already saved are kept. If you stop in the middle of a take, the
+# ESP32 keeps sending until the take's full length is up: wait for the OLED to say "ready", or press RESET.
 # Close PlatformIO's serial monitor first: only one program can have the port open at a time.
 
 # How one recording travels over the serial port (must match the comments at the top of main.cpp):
@@ -70,8 +74,10 @@ SAMPLE_RATE = 16000
 ESPRESSIF_VID = 0x303A
 # the project folder (this file is in <project>/scripts/)
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-# where the WAV files go
+# where test clips go
 OUT_DIR = PROJECT_DIR / "data" / "raw" / "clips"
+# where labelled takes go: data/takes/<session>/<label>/take_###.wav
+TAKES_DIR = PROJECT_DIR / "data" / "takes"
 # seconds to wait for the header after asking for a clip, before asking again
 HEADER_TIMEOUT = 2.0
 # how many times to ask (the board may be rebooting when the port opens, and miss the first request)
@@ -80,7 +86,7 @@ REQUEST_TRIES = 3
 STALL_TIMEOUT = 1.0
 # in a batch, stop after this many bad takes in a row (something needs fixing, retrying won't help)
 MAX_BAD_IN_A_ROW = 3
-# characters Windows doesn't allow in file names, so they can't be used in a label
+# characters Windows doesn't allow in file names, so they can't be used in a label or session
 BAD_LABEL_CHARS = '<>:"/\\|?*'
 
 
@@ -191,8 +197,11 @@ def request_clip(ser, samples):
 # receive_audio: read the clip's audio bytes, showing progress; returns the bytes and how long it took
 #   ser            - the open serial port
 #   expected_bytes - how many bytes the header said would come
+#   rate           - samples per second, to show the progress in seconds
 # ---------------------------------------------------------------------------------------------
-def receive_audio(ser, expected_bytes):
+def receive_audio(ser, expected_bytes, rate):
+    # bytes per second of audio, to turn byte counts into seconds for the progress line
+    bytes_per_second = rate * BYTES_PER_SAMPLE
     # collects the received chunks (joining them once at the end is faster than adding as we go)
     chunks = []
     # bytes received so far
@@ -210,7 +219,9 @@ def receive_audio(ser, expected_bytes):
             received += len(chunk)
             last_data = time.monotonic()
             # progress on one line ("\r" goes back to the start of the line instead of a new line)
-            print(f"\rreceiving: {received:,} / {expected_bytes:,} bytes", end="", flush=True)
+            # in seconds as well as bytes, so you can see how much of a long take is left
+            print(f"\rreceiving: {received / bytes_per_second:.1f} / {expected_bytes / bytes_per_second:.1f} s "
+                  f"({received:,} / {expected_bytes:,} bytes)", end="", flush=True)
         # nothing arrived for too long: the stream stalled, stop with what we have
         elif time.monotonic() - last_data > STALL_TIMEOUT:
             break
@@ -235,7 +246,7 @@ def record_take(ser, wanted):
     # how many audio bytes to expect = samples x 2
     expected_bytes = samples * BYTES_PER_SAMPLE
     # receive the audio
-    audio, elapsed = receive_audio(ser, expected_bytes)
+    audio, elapsed = receive_audio(ser, expected_bytes, rate)
     # the footer that should follow the audio
     footer = ser.read(FOOTER_SIZE)
 
@@ -295,15 +306,16 @@ def record_take(ser, wanted):
 
 
 # ---------------------------------------------------------------------------------------------
-# next_number: find the next free take number for a label, so new takes never overwrite old ones
-#   folder - the label's folder, e.g. data/raw/clips/C_major
-#   label  - the label, e.g. "C_major"
+# next_number: find the next free number for files named <prefix>_###.wav, so new files never overwrite old ones
+#   folder - the folder to look in, e.g. data/takes/2026-10-05/C
+#   prefix - the start of the file names, e.g. "take"
+# (slice_takes.py imports this too, for numbering clips)
 # ---------------------------------------------------------------------------------------------
-def next_number(folder, label):
+def next_number(folder, prefix):
     # the highest number used so far (0 = none yet)
     highest = 0
-    # every file named like C_major_001.wav in the folder
-    for f in folder.glob(f"{label}_*.wav"):
+    # every file named like take_001.wav in the folder
+    for f in folder.glob(f"{prefix}_*.wav"):
         # the part after the last "_", e.g. "001"
         number = f.stem.rsplit("_", 1)[-1]
         # only count it if it really is a number
@@ -348,19 +360,23 @@ def play(path):
 def main():
     # command line options
     parser = argparse.ArgumentParser(description="Record clips from the ESP32 and save them as WAVs.")
-    parser.add_argument("--seconds", type=float, default=5.0, help="clip length in seconds (default 5, max 60)")
-    parser.add_argument("--label", help="chord name, e.g. C_major: saves numbered takes in data/raw/clips/<label>/")
+    parser.add_argument("--seconds", type=float, default=5.0, help="clip length in seconds (default 5, max 300)")
+    parser.add_argument("--label", help="chord name, e.g. C: saves numbered takes in data/takes/<session>/<label>/")
+    parser.add_argument("--session", default=f"{datetime.now():%Y-%m-%d}",
+                        help="session name for labelled takes (default: today's date, e.g. 2026-10-05)")
     parser.add_argument("--count", type=int, default=1, help="how many takes to record (default 1)")
     parser.add_argument("--countdown", type=int, default=3, help="seconds of countdown before each take (default 3)")
     parser.add_argument("--port", help="serial port, e.g. COM5 (default: find the ESP32 automatically)")
     parser.add_argument("--no-play", action="store_true", help="don't play a single test clip after saving it")
     args = parser.parse_args()
 
-    # a label becomes part of the folder and file names, so it can't contain characters Windows forbids
+    # the label and session become folder names, so they can't contain characters Windows forbids
     if args.label and any(c in BAD_LABEL_CHARS for c in args.label):
         sys.exit(f"--label can't contain any of these characters: {BAD_LABEL_CHARS}")
-    # where this run's files go: the label's own folder, or the main clips folder for test clips
-    folder = OUT_DIR / args.label if args.label else OUT_DIR
+    if any(c in BAD_LABEL_CHARS for c in args.session):
+        sys.exit(f"--session can't contain any of these characters: {BAD_LABEL_CHARS}")
+    # where this run's files go: the session's folder for the label, or the main clips folder for test clips
+    folder = TAKES_DIR / args.session / args.label if args.label else OUT_DIR
     # make sure it exists
     folder.mkdir(parents=True, exist_ok=True)
     # only play back a single test clip; when building the dataset it would just slow you down
@@ -409,9 +425,9 @@ def main():
                     if not args.label:
                         print("OK: every byte arrived and the timing matches. Listen for clicks or speed changes.")
 
-                # file name: numbered for a label (C_major_001.wav), dated for a test clip
+                # file name: numbered for a label (take_001.wav), dated for a test clip
                 if args.label:
-                    path = folder / f"{args.label}_{next_number(folder, args.label):03d}.wav"
+                    path = folder / f"take_{next_number(folder, 'take'):03d}.wav"
                 else:
                     path = folder / f"clip_{datetime.now():%Y-%m-%d_%H-%M-%S}.wav"
                 # write a mono, 16-bit WAV at the ESP32's sample rate

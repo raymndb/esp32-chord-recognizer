@@ -59,8 +59,9 @@
 // If record_clip.py reports I2S overflows (heard as gaps), raise DMA_BUF_COUNT (up to 128).
 #define DMA_BUF_COUNT 8
 #define DMA_BUF_LEN   256
-// longest clip the ESP32 will send in one go; longer requests are cut down to this
-#define MAX_CLIP_SECONDS 60
+// longest clip the ESP32 will send in one go; longer requests are cut down to this.
+// 300 s = 5 minutes, long enough for one phase 4 take (the audio streams straight out, so length costs no RAM)
+#define MAX_CLIP_SECONDS 300
 
 // ---------------------------------------------------------------------------------------------
 // OLED pins and screen layout
