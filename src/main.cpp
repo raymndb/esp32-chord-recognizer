@@ -281,8 +281,10 @@ void checkForRequest() {
 // Nothing is printed to serial (that would corrupt the audio stream); errors are shown on the OLED.
 // ---------------------------------------------------------------------------------------------
 void setup() {
-  // give serial a 4 KB send buffer (default 256 bytes) so writing a 1 KB block never has to wait long
-  Serial.setTxBufferSize(4096);
+  // give serial a 32 KB send buffer (default 256 bytes) = 1 second of audio. If the computer stops reading
+  // for a moment (Windows busy, OneDrive syncing), audio waits here instead of being lost: Serial.write()
+  // gives up after 100 ms when the buffer is full, and those samples would be missing from the clip.
+  Serial.setTxBufferSize(32768);
   // start serial; on the ESP32-S3's USB port the number is ignored and data moves at full USB speed.
   // (16-bit audio at 16 kHz is 32,000 bytes/s, far more than a real 115200 baud UART could carry)
   Serial.begin(115200);

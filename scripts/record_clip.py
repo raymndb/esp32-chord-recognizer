@@ -84,6 +84,10 @@ HEADER_TIMEOUT = 2.0
 REQUEST_TRIES = 3
 # if no audio bytes arrive for this many seconds in the middle of a clip, give up on the rest
 STALL_TIMEOUT = 1.0
+# seconds between updates of the "receiving" progress line
+PROGRESS_INTERVAL = 0.2
+# bytes Windows may hold for us when this script falls behind (1 MB = 30 s of audio), if the driver allows it
+RX_BUFFER_SIZE = 1_000_000
 # in a batch, stop after this many bad takes in a row (something needs fixing, retrying won't help)
 MAX_BAD_IN_A_ROW = 3
 # characters Windows doesn't allow in file names, so they can't be used in a label or session
@@ -129,6 +133,9 @@ def open_port(name):
     ser.rts = False
     # now open it
     ser.open()
+    # on Windows, ask the driver for a bigger receive buffer, so a short pause in this script loses nothing
+    if hasattr(ser, "set_buffer_size"):
+        ser.set_buffer_size(rx_size=RX_BUFFER_SIZE)
     return ser
 
 
@@ -210,6 +217,8 @@ def receive_audio(ser, expected_bytes, rate):
     start = time.monotonic()
     # when the last byte arrived, to spot a stalled stream
     last_data = start
+    # when the progress line was last printed (printing hundreds of times a second can slow the reading down)
+    last_print = 0.0
     while received < expected_bytes:
         # read whatever is waiting (at least 1 byte, at most what's left of the clip)
         chunk = ser.read(min(max(ser.in_waiting, 1), expected_bytes - received))
@@ -218,6 +227,10 @@ def receive_audio(ser, expected_bytes, rate):
             chunks.append(chunk)
             received += len(chunk)
             last_data = time.monotonic()
+            # only update the progress line 5 times a second, or at the very end
+            if last_data - last_print < PROGRESS_INTERVAL and received < expected_bytes:
+                continue
+            last_print = last_data
             # progress on one line ("\r" goes back to the start of the line instead of a new line)
             # in seconds as well as bytes, so you can see how much of a long take is left
             print(f"\rreceiving: {received / bytes_per_second:.1f} / {expected_bytes / bytes_per_second:.1f} s "
@@ -297,7 +310,10 @@ def record_take(ser, wanted):
         peak = np.abs(pcm - dc).max()
         # RMS loudness, measured from the DC offset
         rms = np.sqrt(np.mean((pcm - dc) ** 2))
-        print(f"level: peak {peak:.0f}, rms {rms:.0f}, DC offset {dc:.0f} (out of 32767)")
+        # samples stuck at the very edge of the 16-bit range were clipped (counted here too, in case the footer was lost)
+        edge = np.count_nonzero((pcm == 32767) | (pcm == -32768))
+        print(f"level: peak {peak:.0f}, rms {rms:.0f}, DC offset {dc:.0f} (out of 32767), "
+              f"{edge:,} clipped samples ({100 * edge / len(pcm):.2f}%)")
 
     # list the problems, if any
     for p in problems:

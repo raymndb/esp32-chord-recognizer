@@ -7,3 +7,5 @@
 __pycache__/
 # recordings: too big for git, backed up separately
 data/
+# trained models: rebuilt by scripts/train_model.py
+*.keras
